@@ -158,6 +158,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "cursor_send",
+      description: "Send a message to Cursor and return as soon as it's confirmed in the transcript (no waiting for Cursor's reply). Use this with a background sub-agent that polls cursor_read_chat for the response.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          message:  { type: "string", description: "Message to send" },
+          since_ms: { type: "number", description: "Timestamp from cursor_open_chat to scope this session" },
+        },
+        required: ["message", "since_ms"],
+      },
+    },
+    {
       name: "cursor_read_chat",
       description: "Read the full conversation history of the current Cursor agent session.",
       inputSchema: {
@@ -252,13 +264,72 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "cursor_send_and_wait": {
-        const r = await bridge("POST", "/chat/send_and_wait", {
+        const sinceMs   = a.since_ms as number;
+        const maxWaitMs = (a.timeout_ms as number | undefined) ?? 300_000;
+        const pollMs    = 4_000;   // interval between /chat/read polls
+        const sendTimeoutMs = 60_000; // single send call timeout
+
+        // Step 1: send with confirmation (short timeout per attempt)
+        const sent = await bridge("POST", "/chat/send_and_wait", {
           message:    a.message,
-          since_ms:   a.since_ms,
-          timeout_ms: (a.timeout_ms as number | undefined) ?? 300_000,
-        }, 310_000) as { ok?: boolean; text?: string; error?: string; waited_ms?: number; attempt?: number };
-        if (!r.ok) return { content: [{ type: "text", text: `Error: ${r.error}` }], isError: true };
-        return { content: [{ type: "text", text: `**Cursor** (${r.waited_ms}ms, attempt ${r.attempt}):\n\n${r.text}` }] };
+          since_ms:   sinceMs,
+          timeout_ms: sendTimeoutMs,
+        }, sendTimeoutMs + 5_000) as { ok?: boolean; text?: string; error?: string; waited_ms?: number; attempt?: number };
+
+        // If bridge already returned a full response within sendTimeoutMs, we're done
+        if (sent.ok && sent.text) {
+          return { content: [{ type: "text", text: `**Cursor** (${sent.waited_ms}ms):\n\n${sent.text}` }] };
+        }
+
+        // If send failed entirely (not a timeout), surface the error
+        if (!sent.ok && sent.error && !sent.error.includes("timeout")) {
+          return { content: [{ type: "text", text: `Error: ${sent.error}` }], isError: true };
+        }
+
+        // Step 2: Cursor is still working — poll /chat/read until response appears
+        const deadline = Date.now() + maxWaitMs;
+        let prevAssistantCount = -1;
+
+        while (Date.now() < deadline) {
+          await new Promise(r => setTimeout(r, pollMs));
+
+          const read = await bridge("GET", `/chat/read?since=${sinceMs}`, undefined, 10_000)
+            .catch(() => null) as { messages?: Array<{ role: string; text: string }> } | null;
+
+          if (!read?.messages) continue;
+
+          const assistants = read.messages.filter(m => m.role === "assistant");
+
+          // First poll — establish baseline count
+          if (prevAssistantCount === -1) {
+            prevAssistantCount = assistants.length;
+            continue;
+          }
+
+          // New assistant message appeared → response is ready
+          if (assistants.length > prevAssistantCount) {
+            const reply = assistants[assistants.length - 1].text;
+            return { content: [{ type: "text", text: `**Cursor**:\n\n${reply}` }] };
+          }
+        }
+
+        return { content: [{ type: "text", text: "Timeout: Cursor no respondió dentro del tiempo límite." }], isError: true };
+      }
+
+      case "cursor_send": {
+        const r = await bridge("POST", "/chat/send", {
+          message:  a.message,
+          since_ms: a.since_ms,
+        }, 65_000) as { ok?: boolean; confirmed?: boolean; composerId?: string; attempt?: number; error?: string };
+        if (!r.ok || !r.confirmed) {
+          return { content: [{ type: "text", text: `Error: ${r.error ?? "send not confirmed"}` }], isError: true };
+        }
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ confirmed: true, composerId: r.composerId, since_ms: a.since_ms, attempt: r.attempt }),
+          }],
+        };
       }
 
       case "cursor_read_chat": {
