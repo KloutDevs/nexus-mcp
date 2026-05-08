@@ -4,16 +4,17 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { request as httpRequest } from "http";
 
-const BRIDGE_PORT = parseInt(process.env.KLOUT_BRIDGE_PORT ?? "9421", 10);
+const DEFAULT_PORT = parseInt(process.env.KLOUT_BRIDGE_PORT ?? "9421", 10);
+const PORT_SCAN_RANGE = [DEFAULT_PORT, ...Array.from({ length: 10 }, (_, i) => DEFAULT_PORT + i + 1)];
 
 // ─── bridge helper ────────────────────────────────────────────────────────────
-function bridge(method: string, path: string, body?: unknown, timeoutMs = 310_000): Promise<unknown> {
+function bridge(method: string, path: string, body?: unknown, timeoutMs = 310_000, port = DEFAULT_PORT): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const payload = body !== undefined ? JSON.stringify(body) : undefined;
     const req = httpRequest(
       {
         hostname: "127.0.0.1",
-        port: BRIDGE_PORT,
+        port,
         path,
         method,
         timeout: timeoutMs,
@@ -130,17 +131,28 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: { type: "object", properties: {} },
     },
     {
-      name: "cursor_status",
-      description: "Check if the Cursor MCP bridge is running on port 9421.",
+      name: "cursor_list_workspaces",
+      description: "Discover all active Cursor bridge instances. Returns each open Cursor window with its workspace name and port. Use when multiple Cursor projects are open simultaneously.",
       inputSchema: { type: "object", properties: {} },
     },
     {
+      name: "cursor_status",
+      description: "Check if the Cursor MCP bridge is running. Pass port to target a specific Cursor window.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          port: { type: "number", description: "Bridge port (default 9421). Use cursor_list_workspaces to find the right port." },
+        },
+      },
+    },
+    {
       name: "cursor_open_chat",
-      description: "Open a new chat, composer, or agent panel in Cursor. Returns since_ms — pass it to cursor_send_and_wait to scope the session.",
+      description: "Open a new chat, composer, or agent panel in Cursor. Returns since_ms, workspace and port — store them to scope all subsequent calls to this session.",
       inputSchema: {
         type: "object",
         properties: {
           mode: { type: "string", enum: ["chat", "composer", "agent"], description: "Panel to open (default: agent)" },
+          port: { type: "number", description: "Bridge port. Use cursor_list_workspaces to find it." },
         },
       },
     },
@@ -159,25 +171,28 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "cursor_send",
-      description: "Send a message to Cursor and return as soon as it's confirmed in the transcript (no waiting for Cursor's reply). Use this with a background sub-agent that polls cursor_read_chat for the response.",
+      description: "Send a message to Cursor and return as soon as it's confirmed in the transcript (no waiting for Cursor's reply). On first call pass since_ms; after that pass composer_id for targeted, session-isolated delivery.",
       inputSchema: {
         type: "object",
         properties: {
-          message:  { type: "string", description: "Message to send" },
-          since_ms: { type: "number", description: "Timestamp from cursor_open_chat to scope this session" },
+          message:     { type: "string", description: "Message to send" },
+          since_ms:    { type: "number", description: "Timestamp from cursor_open_chat — used only when composer_id is unknown" },
+          composer_id: { type: "string", description: "Composer ID returned by a previous cursor_send call — use this for all messages after the first" },
+          port:        { type: "number", description: "Bridge port (from cursor_list_workspaces or cursor_open_chat)" },
         },
-        required: ["message", "since_ms"],
+        required: ["message"],
       },
     },
     {
       name: "cursor_read_chat",
-      description: "Read the full conversation history of the current Cursor agent session.",
+      description: "Read the conversation history of a Cursor agent session. Pass composer_id for direct, unambiguous access to a specific session.",
       inputSchema: {
         type: "object",
         properties: {
-          since_ms: { type: "number", description: "Filter to transcripts created after this timestamp" },
+          composer_id: { type: "string", description: "Composer ID from cursor_send response — preferred over since_ms" },
+          since_ms:    { type: "number", description: "Fallback: filter transcripts by creation time" },
+          port:        { type: "number", description: "Bridge port" },
         },
-        required: ["since_ms"],
       },
     },
     {
@@ -252,15 +267,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "get_context":
         return { content: [{ type: "text", text: CONTEXT }] };
 
+      case "cursor_list_workspaces": {
+        const results: Array<{ port: number; workspace: string; version: string }> = [];
+        await Promise.all(PORT_SCAN_RANGE.map(async (p) => {
+          try {
+            const r = await bridge("GET", "/status", undefined, 3_000, p) as Record<string, unknown>;
+            if (r?.active) results.push({ port: p, workspace: String(r.workspace ?? ""), version: String(r.version ?? "") });
+          } catch { /* not running */ }
+        }));
+        results.sort((a, b) => a.port - b.port);
+        return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
+      }
+
       case "cursor_status": {
-        const r = await bridge("GET", "/status");
+        const port = (a.port as number | undefined) ?? DEFAULT_PORT;
+        const r = await bridge("GET", "/status", undefined, 10_000, port);
         return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
       }
 
       case "cursor_open_chat": {
+        const port = (a.port as number | undefined) ?? DEFAULT_PORT;
         const openedAt = Date.now();
-        const r = await bridge("POST", "/chat/open", { mode: (a.mode as string | undefined) ?? "agent" });
-        return { content: [{ type: "text", text: JSON.stringify({ ...(r as object), since_ms: openedAt }, null, 2) }] };
+        const r = await bridge("POST", "/chat/open", { mode: (a.mode as string | undefined) ?? "agent" }, 10_000, port) as Record<string, unknown>;
+        const status = await bridge("GET", "/status", undefined, 5_000, port) as Record<string, unknown>;
+        return { content: [{ type: "text", text: JSON.stringify({ ...r, since_ms: openedAt, port, workspace: status.workspace ?? "" }, null, 2) }] };
       }
 
       case "cursor_send_and_wait": {
@@ -317,23 +347,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "cursor_send": {
+        const port = (a.port as number | undefined) ?? DEFAULT_PORT;
         const r = await bridge("POST", "/chat/send", {
-          message:  a.message,
-          since_ms: a.since_ms,
-        }, 65_000) as { ok?: boolean; confirmed?: boolean; composerId?: string; attempt?: number; error?: string };
+          message:     a.message,
+          since_ms:    a.since_ms,
+          composer_id: a.composer_id,
+        }, 65_000, port) as { ok?: boolean; confirmed?: boolean; composerId?: string; workspace?: string; attempt?: number; error?: string };
         if (!r.ok || !r.confirmed) {
           return { content: [{ type: "text", text: `Error: ${r.error ?? "send not confirmed"}` }], isError: true };
         }
         return {
           content: [{
             type: "text",
-            text: JSON.stringify({ confirmed: true, composerId: r.composerId, since_ms: a.since_ms, attempt: r.attempt }),
+            text: JSON.stringify({ confirmed: true, composer_id: r.composerId, workspace: r.workspace, port, attempt: r.attempt }),
           }],
         };
       }
 
       case "cursor_read_chat": {
-        const r = await bridge("GET", `/chat/read?since=${a.since_ms ?? 0}`);
+        const port = (a.port as number | undefined) ?? DEFAULT_PORT;
+        const composerId = a.composer_id as string | undefined;
+        const qs = composerId
+          ? `?composer_id=${encodeURIComponent(composerId)}`
+          : `?since=${a.since_ms ?? 0}`;
+        const r = await bridge("GET", `/chat/read${qs}`, undefined, 10_000, port);
         return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
       }
 
