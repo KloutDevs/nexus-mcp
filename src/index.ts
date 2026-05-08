@@ -54,7 +54,7 @@ Nahuel Schmidt (schmidtnahuel09@gmail.com) — desarrollador fullstack, trabaja 
 
 **Arquitectura:**
 \`\`\`
-Claude Code CLI  →  klout-mcp (este MCP)  →  HTTP :9421  →  cursor-mcp-bridge extension  →  Cursor IDE
+Claude Code CLI  →  nexus-mcp (este MCP)  →  HTTP :9421  →  cursor-mcp-bridge extension  →  Cursor IDE
 \`\`\`
 
 **Extension bridge** (\`extension/\`):
@@ -80,8 +80,8 @@ Claude Code CLI  →  klout-mcp (este MCP)  →  HTTP :9421  →  cursor-mcp-bri
 
 **Rama activa:** \`feat/broker-server-registry\`
 
-### klout-mcp (este MCP)
-**Ruta local:** \`C:\\Users\\bigma\\Desktop\\Nahuel\\Trabajo\\klout-mcp\`
+### nexus-mcp (este MCP)
+**Ruta local:** \`C:\\Users\\bigma\\Desktop\\Nahuel\\Trabajo\\nexus-mcp\`
 **Qué es:** MCP global instalado en Claude Code para dar contexto y controlar Cursor en cualquier sesión.
 
 ## Cursor MCP Bridge — cómo funciona
@@ -118,7 +118,7 @@ const r2 = await cursor_send_and_wait({ message: "...", since_ms });
 
 // ─── server ───────────────────────────────────────────────────────────────────
 const server = new Server(
-  { name: "klout-mcp", version: "1.0.0" },
+  { name: "nexus-mcp", version: "1.0.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -126,7 +126,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: "get_context",
-      description: "Returns full context about Nahuel's workspace: projects (vscode-mcp, HonorBridge, klout-mcp), architecture, how the Cursor bridge works, and user preferences. Call this at the start of any session to get up to speed.",
+      description: "Returns full context about Nahuel's workspace: projects (vscode-mcp, HonorBridge, nexus-mcp), architecture, how the Cursor bridge works, and user preferences. Call this at the start of any session to get up to speed.",
       inputSchema: { type: "object", properties: {} },
     },
     {
@@ -318,6 +318,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  process.stderr.write("klout-mcp running\n");
+  process.stderr.write("nexus-mcp running\n");
 }
 main().catch(e => { process.stderr.write(`${e}\n`); process.exit(1); });

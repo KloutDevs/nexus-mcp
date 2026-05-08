@@ -1,7 +1,7 @@
 {
-  "name": "klout-mcp",
+  "name": "nexus-mcp",
   "version": "1.0.0",
-  "description": "Personal MCP for Claude Code CLI — context + Cursor IDE control",
+  "description": "Personal MCP for Claude Code CLI — workspace context + Cursor IDE control",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
